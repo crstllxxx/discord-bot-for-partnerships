@@ -289,6 +289,30 @@ class AdsBot(discord.Client):
             current_ads = self.load_ads()
             return list(current_ads.ads)
 
+    async def resolve_ad_selection(self, ad_number: int | None, ad_name: str | None) -> AdItem:
+        """Возвращаем выбранное объявление по номеру или названию."""
+
+        if (ad_number is None and ad_name is None) or (ad_number is not None and ad_name is not None):
+            raise ValueError("Укажите либо ad_number, либо ad_name.")
+
+        async with self.lock:
+            current_ads = self.load_ads()
+
+        if not current_ads.ads:
+            raise ValueError("Список рекламы пуст.")
+
+        if ad_number is not None:
+            if ad_number < 1 or ad_number > len(current_ads.ads):
+                raise ValueError(f"Некорректный номер. Доступно объявлений: {len(current_ads.ads)}.")
+            return current_ads.ads[ad_number - 1]
+
+        normalized_name = self._validate_non_empty_str(ad_name or "", "ad_name", max_len=100)
+        for ad in current_ads.ads:
+            if ad.name.casefold() == normalized_name.casefold():
+                return ad
+
+        raise ValueError(f"Реклама с названием '{normalized_name}' не найдена.")
+
     async def reload_data(self) -> None:
         """Перезагружаем конфигурацию, рекламу и пересобираем расписание."""
 
@@ -344,6 +368,14 @@ class AdsBot(discord.Client):
             ad = self.ads_data.ads[self.runtime_state.next_ad_index % len(self.ads_data.ads)]
             self.runtime_state.next_ad_index += 1
 
+        await self._send_ad_to_channel(ad, channel)
+
+    async def _send_ad_to_channel(self, ad: AdItem, channel: discord.TextChannel) -> None:
+        """Отправляем выбранное рекламное объявление в конкретный канал."""
+
+        if self.config is None:
+            raise ValueError("Конфигурация не загружена.")
+
         embed = discord.Embed(
             title=f"Реклама сервера: {ad.name}",
             description=ad.description,
@@ -357,6 +389,7 @@ class AdsBot(discord.Client):
             logger.info("Отправлена реклама сервера: %s", ad.name)
         except discord.DiscordException as exc:
             logger.exception("Ошибка отправки рекламного сообщения: %s", exc)
+            raise RuntimeError(f"Не удалось отправить рекламу: {exc}") from exc
 
     def _is_admin(self, interaction: discord.Interaction) -> bool:
         """Проверяем, что команду выполняет администратор сервера."""
@@ -408,6 +441,114 @@ class AdsBot(discord.Client):
             except Exception as exc:
                 logger.exception("Ошибка в /ads_send_now: %s", exc)
                 await interaction.followup.send(f"Ошибка отправки: {exc}", ephemeral=True)
+
+        @self.tree.command(name="ads_send_specific", description="Отправить выбранную рекламу")
+        @discord.app_commands.describe(
+            ad_number="Номер объявления из /ads_list (начиная с 1)",
+            ad_name="Название объявления для отправки",
+            target_channel="Канал отправки (если не указан — канал из config.json)",
+        )
+        async def ads_send_specific(
+            interaction: discord.Interaction,
+            ad_number: int | None = None,
+            ad_name: str | None = None,
+            target_channel: discord.TextChannel | None = None,
+        ) -> None:
+            """Команда для отправки конкретной рекламы по номеру или названию."""
+
+            if not self._is_admin(interaction):
+                await interaction.response.send_message(
+                    "Недостаточно прав. Нужны права администратора.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                selected_ad = await self.resolve_ad_selection(ad_number, ad_name)
+
+                channel = target_channel
+                if channel is None:
+                    if self.config is None:
+                        await interaction.followup.send("Конфигурация не загружена.", ephemeral=True)
+                        return
+                    resolved_channel = self.get_channel(self.config.channel_id)
+                    if not isinstance(resolved_channel, discord.TextChannel):
+                        await interaction.followup.send(
+                            "Канал из config.json недоступен или не является текстовым.",
+                            ephemeral=True,
+                        )
+                        return
+                    channel = resolved_channel
+
+                await self._send_ad_to_channel(selected_ad, channel)
+                await interaction.followup.send(
+                    f"Реклама '{selected_ad.name}' отправлена в {channel.mention}.",
+                    ephemeral=True,
+                )
+            except Exception as exc:
+                logger.exception("Ошибка в /ads_send_specific: %s", exc)
+                await interaction.followup.send(f"Ошибка отправки: {exc}", ephemeral=True)
+
+        @self.tree.command(name="ads_preview", description="Предпросмотр выбранной рекламы")
+        @discord.app_commands.describe(
+            ad_number="Номер объявления из /ads_list (начиная с 1)",
+            ad_name="Название объявления для предпросмотра",
+        )
+        async def ads_preview(
+            interaction: discord.Interaction,
+            ad_number: int | None = None,
+            ad_name: str | None = None,
+        ) -> None:
+            """Показываем предпросмотр конкретной рекламы без отправки в канал."""
+
+            if not self._is_admin(interaction):
+                await interaction.response.send_message(
+                    "Недостаточно прав. Нужны права администратора.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            try:
+                selected_ad = await self.resolve_ad_selection(ad_number, ad_name)
+
+                preview_embed = discord.Embed(
+                    title=f"Предпросмотр рекламы: {selected_ad.name}",
+                    description=selected_ad.description,
+                    color=discord.Color.gold(),
+                )
+                preview_embed.add_field(
+                    name="Ссылка-приглашение",
+                    value=str(selected_ad.invite_url),
+                    inline=False,
+                )
+                await interaction.followup.send(embed=preview_embed, ephemeral=True)
+            except Exception as exc:
+                logger.exception("Ошибка в /ads_preview: %s", exc)
+                await interaction.followup.send(f"Ошибка предпросмотра: {exc}", ephemeral=True)
+
+        @ads_send_specific.autocomplete("ad_name")
+        async def ads_send_specific_autocomplete(
+            interaction: discord.Interaction,
+            current: str,
+        ) -> list[discord.app_commands.Choice[str]]:
+            """Автодополнение названия рекламы для команды отдельной отправки."""
+
+            try:
+                ads = await self.list_ads()
+            except Exception:
+                return []
+
+            current_cf = current.casefold().strip()
+            names = []
+            for ad in ads:
+                if current_cf and current_cf not in ad.name.casefold():
+                    continue
+                if ad.name not in names:
+                    names.append(ad.name)
+
+            return [discord.app_commands.Choice(name=name[:100], value=name) for name in names[:25]]
 
         @self.tree.command(name="ads_add", description="Добавить новую рекламу в ads.json")
         @discord.app_commands.describe(
