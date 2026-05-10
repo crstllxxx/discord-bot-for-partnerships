@@ -44,6 +44,7 @@ class BotConfig:
     channel_id: int
     timezone: str
     post_times: list[str]
+    post_interval_days: int
 
 
 @dataclass
@@ -158,12 +159,16 @@ class AdsBot(discord.Client):
 
             timezone = self._validate_non_empty_str(raw.get("timezone"), "timezone", max_len=100)
             post_times = self._validate_post_times(raw.get("post_times"))
+            post_interval_days = raw.get("post_interval_days", 1)
+            if not isinstance(post_interval_days, int) or post_interval_days < 1 or post_interval_days > 31:
+                raise ValueError("Поле 'post_interval_days' должно быть целым числом от 1 до 31.")
             ZoneInfo(timezone)
 
             config = BotConfig(
                 channel_id=channel_id,
                 timezone=timezone,
                 post_times=post_times,
+                post_interval_days=post_interval_days,
             )
         except ZoneInfoNotFoundError as exc:
             raise ValueError(f"Неизвестный timezone: {raw.get('timezone')}") from exc
@@ -330,12 +335,14 @@ class AdsBot(discord.Client):
 
         self.scheduler.remove_all_jobs()
         tz = ZoneInfo(self.config.timezone)
+        day_expression = "*" if self.config.post_interval_days == 1 else f"*/{self.config.post_interval_days}"
 
         for idx, post_time in enumerate(self.config.post_times):
             hour, minute = post_time.split(":")
             self.scheduler.add_job(
                 self.send_scheduled_ad,
                 trigger="cron",
+                day=day_expression,
                 hour=int(hour),
                 minute=int(minute),
                 timezone=tz,
@@ -346,7 +353,11 @@ class AdsBot(discord.Client):
         if not self.scheduler.running:
             self.scheduler.start()
 
-        logger.info("Расписание обновлено. Времена: %s", ", ".join(self.config.post_times))
+        logger.info(
+            "Расписание обновлено. Интервал дней: %s. Времена: %s",
+            self.config.post_interval_days,
+            ", ".join(self.config.post_times),
+        )
 
     async def send_scheduled_ad(self) -> None:
         """Отправляем следующее рекламное сообщение в указанный канал."""
