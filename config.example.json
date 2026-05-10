@@ -2,8 +2,9 @@
   "channel_id": 1234567890,
   "timezone": "Europe/Moscow",
   "post_times": [
-    "20:00",
+    "10:00",
     "16:30",
     "21:00"
-  ]
+  ],
+  "post_interval_days": 1
 }
